@@ -1,0 +1,294 @@
+---
+title: "p8105_hw6_am6594"
+author: "Alice Mao"
+date: "2024-12-03"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load necessary libraries
+library(tidyverse)
+library(broom)
+library(purrr)
+library(modelr)
+library(crossval)
+library(scales)
+library(rnoaa)
+
+```
+
+# Problem 1
+
+```{r}
+# Download data
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+
+# Preview data
+head(weather_df)
+
+```
+```{r}
+# Fit the linear regression model
+lm_model <- lm(tmax ~ tmin, data = weather_df)
+summary(lm_model)
+
+# Extract R^2
+r_squared <- glance(lm_model)$r.squared
+r_squared
+
+```
+
+```{r}
+# Define the bootstrap function
+set.seed(123)
+bootstrap_samples <- weather_df %>%
+  bootstrap(5000)
+
+# Perform bootstrap analysis
+bootstrap_results <- bootstrap_samples %>%
+  mutate(
+    models = map(strap, ~lm(tmax ~ tmin, data = .x)),
+    r_squared = map_dbl(models, ~glance(.x)$r.squared),
+    log_beta = map(models, ~tidy(.x)) %>%
+      map_dbl(~log(.[1, "estimate"] * .[2, "estimate"]))
+  )
+
+# Extract R^2 and log(beta0 * beta1)
+r_squared_bootstrap <- bootstrap_results$r_squared
+log_beta_bootstrap <- bootstrap_results$log_beta
+
+# Calculate 95% Confidence Intervals
+r_squared_ci <- quantile(r_squared_bootstrap, c(0.025, 0.975))
+log_beta_ci <- quantile(log_beta_bootstrap, c(0.025, 0.975))
+```
+
+
+# Problem 2
+
+```{r}
+# Load the dataset
+homicides <- read_csv("data/homicide-data.csv")
+```
+
+```{r}
+# Create city_state variable
+homicides <- homicides %>%
+  mutate(city_state = paste(city, state, sep = ", "))
+
+# Create binary variable indicating whether the homicide is solved
+homicides <- homicides %>%
+  mutate(solved = if_else(disposition == "Closed by arrest", 1, 0))
+
+# Omit specified cities
+omit_cities <- c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL")
+homicides <- homicides %>%
+  filter(!city_state %in% omit_cities)
+
+# Limit analysis to cases where victim_race is "White" or "Black"
+homicides <- homicides %>%
+  filter(victim_race %in% c("White", "Black"))
+
+# Ensure victim_age is numeric and remove rows with missing victim_age
+homicides <- homicides %>%
+  mutate(victim_age = as.numeric(victim_age)) %>%
+  filter(!is.na(victim_age))
+
+```
+
+```{r}
+# Filter data for Baltimore, MD
+baltimore_data <- homicides %>%
+  filter(city_state == "Baltimore, MD")
+
+# Fit logistic regression model
+baltimore_glm <- glm(solved ~ victim_age + victim_sex + victim_race, data = baltimore_data, family = binomial)
+
+# Save output as an R object and tidy the results
+baltimore_tidy <- tidy(baltimore_glm, conf.int = TRUE, exponentiate = TRUE)
+
+# Obtain estimate and CI for adjusted OR comparing male to female victims
+male_vs_female_or <- baltimore_tidy %>%
+  filter(term == "victim_sexMale") %>%
+  select(term, estimate, conf.low, conf.high)
+
+# Display the result
+male_vs_female_or
+```
+
+
+
+```{r}
+# Filter out cities where victim_sex or victim_race has only one level
+city_sex_race_counts <- homicides %>%
+  group_by(city_state) %>%
+  summarize(
+    sex_levels = n_distinct(victim_sex),
+    race_levels = n_distinct(victim_race)
+  )
+
+valid_cities <- city_sex_race_counts %>%
+  filter(sex_levels > 1, race_levels > 1) %>%
+  pull(city_state)
+
+homicides_filtered <- homicides %>%
+  filter(city_state %in% valid_cities)
+
+# Run glm for each city with error handling
+city_models <- homicides_filtered %>%
+  group_by(city_state) %>%
+  nest() %>%
+  mutate(
+    model = map(data, ~ safely(glm)(solved ~ victim_age + victim_sex + victim_race, data = ., family = binomial))
+  )
+
+# Extract the results, handling errors
+city_models <- city_models %>%
+  mutate(model_result = map(model, "result"), model_error = map(model, "error"),
+         tidied = map(model_result, ~ if(!is.null(.x)) tidy(.x, conf.int = TRUE, exponentiate = TRUE) else NULL))
+
+# Extract adjusted ORs and CIs for victim_sexMale
+or_results <- city_models %>%
+  unnest(tidied) %>%
+  filter(term == "victim_sexMale") %>%
+  select(city_state, estimate, conf.low, conf.high)
+
+```
+
+```{r}
+# Organize cities according to estimated OR
+or_results <- or_results %>%
+  arrange(estimate) %>%
+  mutate(city_state = factor(city_state, levels = city_state))
+
+# Create the plot
+ggplot(or_results, aes(x = estimate, y = city_state)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red") +
+  xlab("Adjusted Odds Ratio (Male vs Female Victims)") +
+  ylab("City") +
+  ggtitle("Adjusted Odds Ratios for Solving Homicides by City") +
+  theme_minimal()
+
+```
+
+This plot shows adjusted odds ratios (ORs) for solving homicides by city, comparing male versus female victims. The x-axis represents the odds ratio, with a red reference line at OR = 1, indicating no difference between male and female victims in terms of case resolution. Values above 1 suggest that cases involving male victims are more likely to be solved, while values below 1 indicate a higher likelihood for cases involving female victims. While the majority of cities have ORs near 1, indicating similar likelihoods of solving cases for both genders, some cities show substantial deviations. Notably, the wide confidence intervals for some cities indicate a lack of precision, possibly due to smaller sample sizes or greater variability in the data. These discrepancies suggest systemic or regional differences in investigative priorities or resources, warranting further exploration of local practices and socio-cultural factors influencing case resolutions. The plot underscores the importance of understanding such disparities to ensure equity in homicide investigations across gender and location.
+
+# Problem 3
+
+
+```{r}
+# Load the dataset
+birthweight <- read_csv("data/birthweight.csv")
+
+# Briefly check the dataset
+structure(birthweight)
+```
+
+```{r}
+# Convert appropriate variables to factors
+birthweight <- birthweight %>%
+  mutate(
+    babysex = factor(babysex, labels = c("Male", "Female")),
+    frace = factor(frace),
+    malform = factor(malform, labels = c("Absent", "Present")),
+    mrace = factor(mrace)
+  )
+
+# Check for missing data
+missing_data <- colSums(is.na(birthweight))
+
+# Summarize key variables
+summary(birthweight)
+
+# Visualize birthweight distribution
+ggplot(birthweight, aes(x = bwt)) +
+  geom_histogram(binwidth = 100, fill = "skyblue", color = "black") +
+  labs(title = "Distribution of Birthweights", x = "Birthweight (grams)", y = "Count")
+
+```
+
+
+```{r}
+# Hypothesized model
+model_hypothesis <- lm(bwt ~ babysex + bhead + blength + delwt + gaweeks + ppbmi + smoken, data = birthweight)
+
+# Add predictions and residuals
+birthweight <- birthweight %>%
+  add_predictions(model_hypothesis, var = "fitted") %>%
+  add_residuals(model_hypothesis, var = "residuals")
+
+# Plot residuals vs. fitted values
+ggplot(birthweight, aes(x = fitted, y = residuals)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals vs Fitted Values", x = "Fitted Values", y = "Residuals")
+
+```
+
+```{r}
+set.seed(123)
+
+# Create cross-validation folds
+cv_data <- crossv_mc(birthweight, n = 10)
+
+# Fit and evaluate models
+cv_results <- cv_data %>%
+  mutate(
+    model_hypothesis = map(train, ~lm(bwt ~ babysex + bhead + blength + delwt + gaweeks + ppbmi + smoken, data = as.data.frame(.))),
+    model_main_effect = map(train, ~lm(bwt ~ blength + gaweeks, data = as.data.frame(.))),
+    model_interact = map(train, ~lm(bwt ~ bhead * blength * babysex, data = as.data.frame(.))),
+    
+    # Calculate RMSE for test sets
+    rmse_hypothesis = map2_dbl(model_hypothesis, test, ~sqrt(mean((predict(.x, as.data.frame(.y)) - as.data.frame(.y)$bwt)^2))),
+    rmse_main_effect = map2_dbl(model_main_effect, test, ~sqrt(mean((predict(.x, as.data.frame(.y)) - as.data.frame(.y)$bwt)^2))),
+    rmse_interact = map2_dbl(model_interact, test, ~sqrt(mean((predict(.x, as.data.frame(.y)) - as.data.frame(.y)$bwt)^2)))
+  )
+
+# Gather RMSE results
+rmse_results <- cv_results %>%
+  select(rmse_hypothesis, rmse_main_effect, rmse_interact) %>%
+  pivot_longer(cols = everything(), names_to = "model", values_to = "rmse") %>%
+  mutate(model = recode(model,
+                        rmse_hypothesis = "Hypothesis",
+                        rmse_main_effect = "Main Effect",
+                        rmse_interact = "Interactions"))
+
+```
+
+
+```{r}
+# Plot RMSE distributions
+ggplot(rmse_results, aes(x = model, y = rmse)) +
+  geom_violin() +
+  labs(title = "Cross-Validation RMSE Distributions",
+       x = "Model",
+       y = "RMSE") +
+  theme_minimal()
+
+# Calculate average RMSE for each model
+rmse_summary <- rmse_results %>%
+  group_by(model) %>%
+  summarize(mean_rmse = mean(rmse), .groups = "drop")
+
+# Display RMSE summary
+rmse_summary
+```
+
+Based on the results, the hypothesis model is the most accurate and consistent predictor of birthweight. In contrast, the main effect model is the least accurate, likely due to the exclusion of important variables and interaction terms. Although the interactions model is more complex than the hypothesis model, it does not significantly improve performance and introduces greater variability.
+
+
