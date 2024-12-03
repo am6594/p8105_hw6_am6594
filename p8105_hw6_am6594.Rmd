@@ -59,21 +59,15 @@ bootstrap_samples <- weather_df %>%
   bootstrap(5000)
 
 # Perform bootstrap analysis
-bootstrap_results <- bootstrap_samples %>%
-  mutate(
-    models = map(strap, ~lm(tmax ~ tmin, data = .x)),
-    r_squared = map_dbl(models, ~glance(.x)$r.squared),
-    log_beta = map(models, ~tidy(.x)) %>%
-      map_dbl(~log(.[1, "estimate"] * .[2, "estimate"]))
-  )
+#bootstrap_results <- bootstrap_samples %>%
+ # mutate(
+  #  models = map(strap, ~lm(tmax ~ tmin, data = .x)),
+   # r_squared = map_dbl(models, ~glance(.x)$r.squared),
+    #log_beta = map(models, ~tidy(.x)) %>%
+     # map_dbl(~log(.[1, "estimate"] * .[2, "estimate"]))
+  #)
 
-# Extract R^2 and log(beta0 * beta1)
-r_squared_bootstrap <- bootstrap_results$r_squared
-log_beta_bootstrap <- bootstrap_results$log_beta
 
-# Calculate 95% Confidence Intervals
-r_squared_ci <- quantile(r_squared_bootstrap, c(0.025, 0.975))
-log_beta_ci <- quantile(log_beta_bootstrap, c(0.025, 0.975))
 ```
 
 
